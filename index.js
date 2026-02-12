@@ -169,6 +169,81 @@ async function telegramSendMessage(chatId, text) {
     body: JSON.stringify({ chat_id: chatId, text })
   });
 }
+function isWeekend(d) {
+  const day = d.getDay(); // 0 Sun ... 6 Sat
+  return day === 0 || day === 6;
+}
+
+function addBusinessDays(date, businessDays) {
+  const d = new Date(date);
+  let added = 0;
+  while (added < businessDays) {
+    d.setDate(d.getDate() + 1);
+    if (!isWeekend(d)) added++;
+  }
+  return d;
+}
+
+function toISODate(d) {
+  // YYYY-MM-DD in local time
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function fromISODate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function prettyDate(d) {
+  // Simple ES format: miércoles 12/02
+  const days = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+  const dayName = days[d.getDay()];
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dayName} ${dd}/${mm}`;
+}
+
+function generateSlots(date) {
+  // 30-min slots within: 10:30-12:00 and 17:00-20:00
+  // We'll output times as HH:MM
+  const slots = [];
+  const ranges = [
+    { start: "10:30", end: "12:00" },
+    { start: "17:00", end: "20:00" }
+  ];
+  for (const r of ranges) {
+    let t = toMinutes(r.start);
+    const end = toMinutes(r.end);
+    while (t + 30 <= end) {
+      slots.push(fromMinutes(t));
+      t += 30;
+    }
+  }
+  return slots;
+}
+
+function toMinutes(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function fromMinutes(mins) {
+  const h = String(Math.floor(mins / 60)).padStart(2, "0");
+  const m = String(mins % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function pick3(arr, startIndex) {
+  // always returns 3 strings (wrap-around)
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    out.push(arr[(startIndex + i) % arr.length]);
+  }
+  return out;
+}
 
 /** ========= START ========= **/
 const PORT = process.env.PORT || 3000;
