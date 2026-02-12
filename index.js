@@ -1,174 +1,204 @@
 import express from "express";
 
+// Node 18+ ya trae fetch. Si tu entorno fuera más viejo, habría que instalar node-fetch.
 const app = express();
 app.use(express.json());
 
-app.get("/", (req, res) => res.status(200).send("OK"));
+// ====== PILOTO: estado en memoria (luego lo pasamos a BD) ======
+const userState = new Map(); // key: chatId -> { dateISO, slotIndex, pendingTime }
 
-/** ========= TELEGRAM ========= **/
+// Health check
+app.get("/", (req, res) => res.status(200).send("OK ✅"));
 
-// Telegram will POST updates here
+/** ========= TELEGRAM WEBHOOK ========= **/
 app.post("/telegram", async (req, res) => {
   try {
     const update = req.body;
 
-    // Acknowledge fast to Telegram
+    // Responder rápido a Telegram
     res.sendStatus(200);
 
-    const msg = update.message;
-    if (!msg || !msg.chat || !msg.text) return;
+    const msg = update?.message;
+    if (!msg?.chat?.id || !msg?.text) return;
 
     const chatId = msg.chat.id;
-    const text = msg.text.trim();
+    const text = msg.text.trim().toUpperCase();
 
-    const chatId = msg.chat.id;
-const text = msg.text.trim().toUpperCase();
+    let state = userState.get(chatId) || { dateISO: null, slotIndex: 0 };
 
-let state = userState.get(chatId) || { dateISO: null, slotIndex: 0 };
+    // ====== MENU / START ======
+    if (["/START", "START", "MENU", "HOLA", "HI", "HELLO"].includes(text)) {
+      await telegramSendMessage(chatId, "OK ✅ Estoy vivo.\nDime: RESERVAR o FAQ");
+      return;
+    }
 
-if (["/START", "START", "MENU", "HOLA", "HI", "HELLO"].includes(text)) {
-  await telegramSendMessage(chatId, "¡Hola! 😊 Escribe: RESERVAR o FAQ");
-  return;
-}
+    // ====== FAQ ======
+    if (text === "FAQ") {
+      await telegramSendMessage(
+        chatId,
+        "FAQ rápida:\n- HORARIOS\n- UBICACION\n- PRECIOS\n\nEscribe una opción o RESERVAR."
+      );
+      return;
+    }
 
-if (text === "FAQ") {
-  await telegramSendMessage(chatId, "FAQ rápida:\n- HORARIOS\n- UBICACION\n- PRECIOS\n\nEscribe una opción o RESERVAR.");
-  return;
-}
+    if (["HORARIOS", "UBICACION", "PRECIOS"].includes(text)) {
+      const answers = {
+        HORARIOS:
+          "Horarios de visitas:\n• 10:30–12:00\n• 17:00–20:00\n(Visitas de 30 min)\n\n¿Quieres RESERVAR una visita?",
+        UBICACION: "Ubicación: (pon aquí el texto real)\n\n¿Quieres RESERVAR una visita?",
+        PRECIOS: "Precios: (pon aquí el texto real)\n\n¿Quieres RESERVAR una visita?"
+      };
+      await telegramSendMessage(chatId, answers[text]);
+      return;
+    }
 
-if (["HORARIOS", "UBICACION", "PRECIOS"].includes(text)) {
-  const answers = {
-    HORARIOS: "Horarios: (pon aquí el texto real). ¿Quieres RESERVAR una visita?",
-    UBICACION: "Ubicación: (pon aquí el texto real). ¿Quieres RESERVAR una visita?",
-    PRECIOS: "Precios: (pon aquí el texto real). ¿Quieres RESERVAR una visita?"
-  };
-  await telegramSendMessage(chatId, answers[text]);
-  return;
-}
+    // ====== RESERVAR ======
+    if (text === "RESERVAR") {
+      const minDate = addBusinessDays(new Date(), 2); // +2 laborables (L-V)
 
-if (text === "RESERVAR") {
-  const minDate = addBusinessDays(new Date(), 2); // L-V
-  state.dateISO = toISODate(minDate);
-  state.slotIndex = 0;
-  userState.set(chatId, state);
+      state = { dateISO: toISODate(minDate), slotIndex: 0, pendingTime: null };
+      userState.set(chatId, state);
 
-  const slots = generateSlots(minDate);
-  const pack = pick3(slots, state.slotIndex);
+      const slots = generateSlots(minDate);
+      const pack = pick3(slots, 0);
 
-  await telegramSendMessage(
-    chatId,
-    `Perfecto ✅\nPrimera fecha disponible: ${prettyDate(minDate)}.\n\nOpciones (30 min):\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde con 1, 2 o 3.\nO escribe: OTRAS (mismo día) / OTRO DIA`
-  );
-  return;
-}
+      await telegramSendMessage(
+        chatId,
+        `Perfecto ✅\nPrimera fecha posible: ${prettyDate(minDate)}.\n\nOpciones (30 min):\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde con 1, 2 o 3.\nO escribe: OTRAS (mismo día) / OTRO DIA`
+      );
+      return;
+    }
 
-if (text === "OTRAS") {
-  if (!state.dateISO) {
-    await telegramSendMessage(chatId, "Aún no has empezado. Escribe: RESERVAR");
-    return;
-  }
-  const d = fromISODate(state.dateISO);
-  const slots = generateSlots(d);
+    // ====== OTRAS (mismo día) ======
+    if (text === "OTRAS") {
+      if (!state?.dateISO) {
+        await telegramSendMessage(chatId, "Aún no has empezado. Escribe: RESERVAR");
+        return;
+      }
 
-  state.slotIndex += 3;
-  if (state.slotIndex >= slots.length) state.slotIndex = 0; // vuelve al inicio si se acaban
-  userState.set(chatId, state);
+      const d = fromISODate(state.dateISO);
+      const slots = generateSlots(d);
 
-  const pack = pick3(slots, state.slotIndex);
-  await telegramSendMessage(
-    chatId,
-    `Más opciones para ${prettyDate(d)}:\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde 1, 2 o 3.\nO escribe: OTRO DIA`
-  );
-  return;
-}
+      const nextSlotIndex = (state.slotIndex + 3) % slots.length;
+      state = { ...state, slotIndex: nextSlotIndex, pendingTime: null };
+      userState.set(chatId, state);
 
-if (text === "OTRO DIA") {
-  if (!state.dateISO) {
-    await telegramSendMessage(chatId, "Aún no has empezado. Escribe: RESERVAR");
-    return;
-  }
-  const d = fromISODate(state.dateISO);
-  const next = addBusinessDays(d, 1); // siguiente laborable
-  state.dateISO = toISODate(next);
-  state.slotIndex = 0;
-  userState.set(chatId, state);
+      const pack = pick3(slots, nextSlotIndex);
 
-  const slots = generateSlots(next);
-  const pack = pick3(slots, 0);
+      await telegramSendMessage(
+        chatId,
+        `Más opciones para ${prettyDate(d)}:\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde 1, 2 o 3.\nO escribe: OTRO DIA`
+      );
+      return;
+    }
 
-  await telegramSendMessage(
-    chatId,
-    `Vale 👍 Siguiente día: ${prettyDate(next)}\n\nOpciones:\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde 1, 2 o 3.\nO escribe: OTRAS / OTRO DIA`
-  );
-  return;
-}
+    // ====== OTRO DIA ======
+    if (text === "OTRO DIA" || text === "OTRO DÍA") {
+      if (!state?.dateISO) {
+        await telegramSendMessage(chatId, "Aún no has empezado. Escribe: RESERVAR");
+        return;
+      }
 
-// Elegir 1/2/3
-if (["1", "2", "3"].includes(text)) {
-  if (!state.dateISO) {
-    await telegramSendMessage(chatId, "Primero escribe: RESERVAR");
-    return;
-  }
-  const d = fromISODate(state.dateISO);
-  const slots = generateSlots(d);
-  const idx = state.slotIndex + (Number(text) - 1);
-  const chosen = slots[idx];
+      const current = fromISODate(state.dateISO);
+      const next = addBusinessDays(current, 1); // siguiente laborable
 
-  if (!chosen) {
-    await telegramSendMessage(chatId, "Esa opción no está disponible. Escribe: OTRAS u OTRO DIA");
-    return;
-  }
+      state = { dateISO: toISODate(next), slotIndex: 0, pendingTime: null };
+      userState.set(chatId, state);
 
-  await telegramSendMessage(
-    chatId,
-    `Confirmo: Visita a recepción el ${prettyDate(d)} a las ${chosen} (30 min).\n\nResponde: CONFIRMAR o CAMBIAR`
-  );
-  // guardamos selección temporal
-  userState.set(chatId, { ...state, pendingTime: chosen });
-  return;
-}
+      const slots = generateSlots(next);
+      const pack = pick3(slots, 0);
 
-if (text === "CAMBIAR") {
-  if (!state.dateISO) {
-    await telegramSendMessage(chatId, "Escribe: RESERVAR");
-    return;
-  }
-  await telegramSendMessage(chatId, "Ok. Escribe: OTRAS (mismo día) u OTRO DIA");
-  return;
-}
+      await telegramSendMessage(
+        chatId,
+        `Vale 👍 Siguiente día: ${prettyDate(next)}\n\nOpciones:\n1) ${pack[0]}\n2) ${pack[1]}\n3) ${pack[2]}\n\nResponde 1, 2 o 3.\nO escribe: OTRAS / OTRO DIA`
+      );
+      return;
+    }
 
-if (text === "CONFIRMAR") {
-  const s = userState.get(chatId);
-  if (!s?.dateISO || !s?.pendingTime) {
-    await telegramSendMessage(chatId, "No tengo una selección pendiente. Escribe: RESERVAR");
-    return;
-  }
-  const d = fromISODate(s.dateISO);
-  await telegramSendMessage(chatId, `¡Listo! ✅ Reservado para ${prettyDate(d)} a las ${s.pendingTime}.\nSi necesitas cambiar: CAMBIAR`);
-  // En V2 aquí creamos evento en Google Calendar
-  userState.set(chatId, { dateISO: s.dateISO, slotIndex: 0 });
-  return;
-}
+    // ====== Elegir 1/2/3 ======
+    if (["1", "2", "3"].includes(text)) {
+      if (!state?.dateISO) {
+        await telegramSendMessage(chatId, "Primero escribe: RESERVAR");
+        return;
+      }
 
-// fallback
-await telegramSendMessage(chatId, "No te he entendido 😅 Escribe: RESERVAR o FAQ");
+      const d = fromISODate(state.dateISO);
+      const slots = generateSlots(d);
+      const idx = state.slotIndex + (Number(text) - 1);
+      const chosen = slots[idx];
 
+      if (!chosen) {
+        await telegramSendMessage(chatId, "Esa opción no está disponible. Escribe: OTRAS u OTRO DIA");
+        return;
+      }
+
+      state = { ...state, pendingTime: chosen };
+      userState.set(chatId, state);
+
+      await telegramSendMessage(
+        chatId,
+        `Confirmo: Visita a recepción el ${prettyDate(d)} a las ${chosen} (30 min).\n\nResponde: CONFIRMAR o CAMBIAR`
+      );
+      return;
+    }
+
+    // ====== CAMBIAR ======
+    if (text === "CAMBIAR") {
+      if (!state?.dateISO) {
+        await telegramSendMessage(chatId, "Escribe: RESERVAR");
+        return;
+      }
+      await telegramSendMessage(chatId, "Ok. Escribe: OTRAS (mismo día) u OTRO DIA");
+      return;
+    }
+
+    // ====== CONFIRMAR ======
+    if (text === "CONFIRMAR") {
+      const s = userState.get(chatId);
+      if (!s?.dateISO || !s?.pendingTime) {
+        await telegramSendMessage(chatId, "No tengo una selección pendiente. Escribe: RESERVAR");
+        return;
+      }
+
+      const d = fromISODate(s.dateISO);
+
+      await telegramSendMessage(
+        chatId,
+        `¡Listo! ✅ Reservado (demo) para ${prettyDate(d)} a las ${s.pendingTime}.\n\nSi necesitas cambiar: CAMBIAR`
+      );
+
+      // En V2: aquí crearíamos el evento en Google Calendar.
+      userState.set(chatId, { dateISO: s.dateISO, slotIndex: 0, pendingTime: null });
+      return;
+    }
+
+    // ====== Fallback ======
+    await telegramSendMessage(chatId, "No te he entendido 😅 Escribe: RESERVAR o FAQ");
   } catch (e) {
     console.error("TELEGRAM ERROR:", e);
+    // Ojo: ya respondimos 200 arriba; aquí solo log.
   }
 });
 
+/** ========= SEND MESSAGE ========= **/
 async function telegramSendMessage(chatId, text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error("Missing TELEGRAM_BOT_TOKEN env var");
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  await fetch(url, {
+  const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
   });
+
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Telegram sendMessage failed: ${resp.status} ${body}`);
+  }
 }
+
+/** ========= DATE/TIME HELPERS ========= **/
 function isWeekend(d) {
   const day = d.getDay(); // 0 Sun ... 6 Sat
   return day === 0 || day === 6;
@@ -185,7 +215,6 @@ function addBusinessDays(date, businessDays) {
 }
 
 function toISODate(d) {
-  // YYYY-MM-DD in local time
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
@@ -198,17 +227,16 @@ function fromISODate(iso) {
 }
 
 function prettyDate(d) {
-  // Simple ES format: miércoles 12/02
-  const days = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+  const days = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
   const dayName = days[d.getDay()];
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dayName} ${dd}/${mm}`;
+  const yyyy = d.getFullYear();
+  return `${dayName} ${dd}/${mm}/${yyyy}`;
 }
 
-function generateSlots(date) {
+function generateSlots(_date) {
   // 30-min slots within: 10:30-12:00 and 17:00-20:00
-  // We'll output times as HH:MM
   const slots = [];
   const ranges = [
     { start: "10:30", end: "12:00" },
@@ -237,11 +265,8 @@ function fromMinutes(mins) {
 }
 
 function pick3(arr, startIndex) {
-  // always returns 3 strings (wrap-around)
   const out = [];
-  for (let i = 0; i < 3; i++) {
-    out.push(arr[(startIndex + i) % arr.length]);
-  }
+  for (let i = 0; i < 3; i++) out.push(arr[(startIndex + i) % arr.length]);
   return out;
 }
 
